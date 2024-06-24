@@ -2,6 +2,12 @@ from tensorflow.keras import layers
 from tensorflow import keras
 import tensorflow as tf
 import numpy as np
+import math
+
+from anchors import Anchor, create_ssd_anchors
+
+LAST_REDUCE_BOXES = True
+LAST_NUM_BOXES = 3 if LAST_REDUCE_BOXES else 6
 
 class Bottleneck(keras.Model):
     def __init__(self, expansion, filters, strides, name, alpha=1):
@@ -121,20 +127,29 @@ class MobileNetV2(keras.Model):
         return x
 
 class SSD(keras.Model):
-    def __init__(self, classes = 10, numBoxes=[4,6,6,6,4,4], layerWidth=[28,14,7,4,2,1], *args, **kwargs):
+    def __init__(self, classes = 10, ratios=[1.0, 2.0, 3.0, 1.0 / 2.0, 1.0 / 3.0], ratios_last=None, *args, **kwargs):
         super(SSD, self).__init__(*args, **kwargs)
-        self.classes = classes + 5
+        if ratios_last is None:
+            ratios_last = [1.0, 2.0, 0.5]
+        self.classes = classes + 4
+        self.ratios = ratios
+        self.ratiosLast = ratios_last
         self.featureMaps = 6
-        self.numBoxes = numBoxes
-        self.layerWidth = layerWidth
+        self.layerSize = [2**3, 2**4, 2**5, 2**6, 2**7, 2**8]
+
+        self.numBoxes = [len(ratios) + 1 for _ in range(self.featureMaps)]
+        self.numBoxes[0] = len(ratios_last)
 
     def build(self, input_shape):
+        anchors = self.gen_anchors(input_shape[1:3])
+        for anchor in anchors:
+            print(anchor.shape)
         self.mobilenet = MobileNetV2(self.classes)
         self.mobilenet.build(input_shape)
-        for layer in self.mobilenet.layers[-7:]:
-            layer.trainable=False
-        for layer in self.mobilenet.layers[-8].layers[2:-1]:
-            layer.trainable=False
+        # for layer in self.mobilenet.layers[-7:]:
+        #     layer.trainable=False
+        # for layer in self.mobilenet.layers[-8].layers[2:-1]:
+        #     layer.trainable=False
         self.features = [None for _ in range(self.featureMaps)]
 
         self.conv1_1 = layers.Conv2D(256,1,name='SSD_conv_1_1')
@@ -150,15 +165,12 @@ class SSD(keras.Model):
         self.conv4_2 = layers.Conv2D(256,2,strides=(1,1),name='SSD_conv_4_2') # changed the kernel size to 2 since the output of the previous layer has width 3
 
         self.conv = []
-        for i in range(self.featureMaps):
+        self.resh = []
+        for i, anchor in enumerate(anchors):
             name1 = f"Classification_{i}"
-            name2 = f"Reshape_{name1}"
-            num_boxes = int(self.layerWidth[i] ** 2) * self.numBoxes[i]
-            classifier = keras.Sequential([
-                layers.Conv2D(self.numBoxes[i] * self.classes, 3, padding='same', name=name1),
-                layers.Reshape((num_boxes, self.classes), name=name2)
-            ], name=name1)
-            self.conv.append(classifier)
+            print(anchor.shape)
+            self.conv.append(layers.Conv2D(self.numBoxes[i] * self.classes, 3, padding='same'))
+            self.resh.append(layers.Reshape((anchor.shape[0], self.classes)))
 
     def call(self, x):
         x = self.mobilenet(x)
@@ -172,52 +184,39 @@ class SSD(keras.Model):
         results = [None for _ in range(self.featureMaps)]
         for i in range(self.featureMaps):
             x = self.conv[i](self.features[i])
+            print(x.shape)
+            x = self.resh[i](x)
             results[i] = x
         x = layers.concatenate(results, axis = -2)
-
-        out1 = x[..., :4]
-        out2 = x[..., 4]
-        out3 = x[..., 5:]
-        if 0:
-            out1 = layers.Lambda(lambda x: x, name="bbox")(out1)
-            out2 = layers.Lambda(lambda x: x, name="conf")(out2)
-            out3 = layers.Lambda(lambda x: x, name="cls")(out3)
-            return out1, out2, out3
-        else:
-            return {"bbox": out1, "conf": out2, "cls": out3}
-
-
         return x
 
-    def gen_anchors(self, img_size, min_scale = 0.1, max_scale = 1.5):
-        scales = [min_scale + x / len(self.layerWidth) * (max_scale-min_scale) for x in range(len(self.layerWidth)) ]
-        scales = scales[::-1] # reversing the order because the layerWidths go from high to low (lower to higher resoltuion)
-
-        asp = [0.5, 1.0, 1.5]
-        asp1 = [x**0.5 for x in asp]
-        asp2 = [1/x for x in asp1]
-
-        num_boxes = sum([a*a*b for a,b in zip(self.layerWidth,self.numBoxes)])
-        centres = np.zeros((num_boxes,2))
-        hw = np.zeros((num_boxes,2))
-        boxes = np.zeros((num_boxes,4))
-
-        idx = 0
-
-        for gridSize, numBox, scale in zip(self.layerWidth,self.numBoxes,scales):
-            step_size = img_size*1.0/gridSize
-            for i in range(gridSize):
-                for j in range(gridSize):
-                    pos = idx + (i*gridSize+j) * numBox
-                    # centre is the same for all aspect ratios(=numBox)
-                    centres[ pos : pos + numBox , :] = i*step_size + step_size/2, j*step_size + step_size/2
-                    # height and width vary according to the scale and aspect ratio
-                    # zip asepct ratios and then scale them by the scaling factor
-                    hw[ pos : pos + numBox , :] = np.multiply(gridSize*scale, np.squeeze(np.dstack([asp1,asp2]),axis=0))[:numBox,:]
-            idx += gridSize * gridSize * numBox
-        boxes[:, 0] = centres[:, 0] - hw[:, 0]/2
-        boxes[:, 1] = centres[:, 1] - hw[:, 1]/2
-        boxes[:, 2] = centres[:, 0] + hw[:, 0]/2
-        boxes[:, 3] = centres[:, 1] + hw[:, 1]/2
-        return boxes
+    def gen_anchors(self, img_size, min_scale = 0.1, max_scale = 0.95):
+        # a = Anchor(
+        #         min_level=3,
+        #         max_level=8,
+        #         num_scales=1,
+        #         aspect_ratios=self.ratios,
+        #         anchor_size=4,
+        #         image_size=img_size,
+        #         )
+        # boxes = []
+        # for data in a.multilevel_boxes:
+        #     print(data.shape)
+        #     data = tf.reshape(data, (-1, self.classes))
+        #     boxes.append(data)
+        # return boxes
+        gen = create_ssd_anchors(min_scale=min_scale, max_scale=max_scale,
+                                 num_layers=self.featureMaps,
+                                 scales=[],
+                                 aspect_ratios=self.ratios,
+                                 aspect_ratios_last=self.ratiosLast,
+                                 interpolated_scale_aspect_ratio = 1.0,
+                                 reduce_boxes_in_lowest_layer = LAST_REDUCE_BOXES,
+                                 base_anchor_size = [1.0, 1.0],
+                                 anchor_strides = [],
+                                 anchor_offsets = [])
+        layers = [(img_size[0] / v, img_size[1] / v) for v in self.layerSize]
+        print(layers)
+        layers = [(math.ceil(x), math.ceil(y)) for (x, y) in layers]
+        return gen.generate(layers, im_width=img_size[0], im_height=img_size[1])
 
