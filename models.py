@@ -126,6 +126,7 @@ class MobileNetV2(keras.Model):
         x = self.conv3(x)
         return x
 
+@keras.utils.register_keras_serializable('vision', name="Loss")
 class SSD(keras.Model):
     def __init__(self, classes = 10, ratios=[1.0, 2.0, 3.0, 1.0 / 2.0, 1.0 / 3.0], ratios_last=None, *args, **kwargs):
         super(SSD, self).__init__(*args, **kwargs)
@@ -142,9 +143,8 @@ class SSD(keras.Model):
 
     def build(self, input_shape):
         anchors = self.gen_anchors(input_shape[1:3])
-        for anchor in anchors:
-            print(anchor.shape)
-        self.mobilenet = MobileNetV2(self.classes)
+        # self.mobilenet = keras.applications.MobileNetV2(input_shape[1:4], alpha=1.0, include_top=False, classes=self.classes, weights=None)
+        self.mobilenet = MobileNetV2(k=self.classes)
         self.mobilenet.build(input_shape)
         # for layer in self.mobilenet.layers[-7:]:
         #     layer.trainable=False
@@ -174,6 +174,7 @@ class SSD(keras.Model):
 
     def call(self, x):
         x = self.mobilenet(x)
+        print(x)
         self.features[0] = self.mobilenet.get_layer("BN4_1").out
         self.features[1] = self.mobilenet.get_layer("BN5_3").out
         self.features[2] = self.conv1_2(self.conv1_1(self.features[1]))
@@ -219,4 +220,9 @@ class SSD(keras.Model):
         print(layers)
         layers = [(math.ceil(x), math.ceil(y)) for (x, y) in layers]
         return gen.generate(layers, im_width=img_size[0], im_height=img_size[1])
+    def model(self, input_shape):
+        if not self.built:
+            self.build(input_shape)
+        input_ = keras.Input(input_shape)
+        return keras.Model(inputs=input_, outputs=self.call(input_))
 
