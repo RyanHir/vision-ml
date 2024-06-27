@@ -5,131 +5,26 @@ import numpy as np
 import math
 
 from anchors import Anchor, create_ssd_anchors
+from feature_extractor.ssd_mobilenet_v2_backbone import SSDMobileNetV2Backbone
 
 LAST_REDUCE_BOXES = True
 LAST_NUM_BOXES = 3 if LAST_REDUCE_BOXES else 6
 
-class Bottleneck(keras.Model):
-    def __init__(self, expansion, filters, strides, name, alpha=1):
-        super(Bottleneck, self).__init__(name=name)
-        self.filters = filters
-        self.strides = strides
-        self.expansion = expansion
-        self.output_channels = alpha * filters
-        self.alpha = alpha
-        self.out = None
 
-    def build(self, input_shape):
-        self.d = int(input_shape[3])
-        # Expand
-        self.expand = layers.Conv2D(
-                filters = self.expansion*self.d,
-                kernel_size = 1,
-                use_bias = False,
-                name="expand")
-        self.expand_bn = layers.BatchNormalization(name="expand_BN")
-        self.expand_relu = layers.ReLU(6.0, name="expand_ReLU")
-        
-        # Conv
-        self.conv = layers.DepthwiseConv2D(kernel_size=3, strides=self.strides, padding='same', use_bias=False, name="conv")
-        self.conv_bn = layers.BatchNormalization(name="conv_BN")
-        self.conv_relu = layers.ReLU(6.0, name="conv_ReLU")
-
-        # Projection
-        self.project = layers.Conv2D(filters=self.filters, kernel_size=1, use_bias=False, name="contract")
-        self.project_bn = layers.BatchNormalization(name="contract_BN")
-
-        self.residual = layers.Add(name="residual")
-
-    def call(self, inputs):
-        x = self.expand(inputs)
-        x = self.expand_bn(x)
-        x = self.expand_relu(x)
-        self.out = x
-
-        x = self.conv(x)
-        x = self.conv_bn(x)
-        x = self.conv_relu(x)
-
-        x = self.project(x)
-        x = self.project_bn(x)
-
-        if self.output_channels == self.d and self.strides == 1:
-            x = self.residual([inputs, x])
-        return x
-
-class MobileNetV2(keras.Model):
-    def __init__(self, num_classes, fully_connected = True):
-        super(MobileNetV2, self).__init__()
-        self.num_classes = num_classes
-        self.fully_connected = fully_connected
-
-    def build(self, input_shape):
-        self.conv1 = layers.Conv2D(
-                filters = 32,
-                kernel_size = 3,
-                strides = (2, 2),
-                padding='valid',
-                use_bias = False)
-        self.bn = layers.BatchNormalization(axis=-1, epsilon=1e-3, momentum=0.999, name="conv_bn")
-        self.relu = layers.ReLU(6.0, name="conv_relu")
-
-        self.bn1 = Bottleneck(1, 16, 1, name="BN1")
-        
-        self.bn2 = Bottleneck(6, 24, 2, name="BN2_1")
-        self.bn3 = Bottleneck(6, 24, 1, name="BN2_2")
-        
-        self.bn4 = Bottleneck(6, 32, 2, name="BN3_1")
-        self.bn5 = Bottleneck(6, 32, 1, name="BN3_2")
-        self.bn6 = Bottleneck(6, 32, 1, name="BN3_3")
-        
-        self.bn5 = Bottleneck(6, 64, 2, name="BN4_1")
-        self.bn6 = Bottleneck(6, 64, 1, name="BN4_2")
-        self.bn7 = Bottleneck(6, 64, 1, name="BN4_3")
-        self.bn8 = Bottleneck(6, 64, 1, name="BN4_4")
-        
-        self.bn9  = Bottleneck(6, 96, 1, name="BN5_1")
-        self.bn10 = Bottleneck(6, 96, 1, name="BN5_2")
-        self.bn11 = Bottleneck(6, 96, 1, name="BN5_3")
-
-        if self.fully_connected:
-            self.bn12 = Bottleneck(6, 160, 2, name="BN6_1")
-            self.bn13 = Bottleneck(6, 160, 1, name="BN6_2")
-            self.bn14 = Bottleneck(6, 160, 1, name="BN6_3")
-            
-            self.bn15 = Bottleneck(6, 320, 1, name="BN7")
-            self.conv2 = layers.Conv2D(filters = 1280, kernel_size=1, strides=(1,1), use_bias=False)
-            self.avgpool = layers.AveragePooling2D(
-                    pool_size = (7,7))
-            self.conv3 = layers.Conv2D(filters=self.num_classes, kernel_size=1, strides=(1,1), use_bias=False)
-
-    def call(self, x):
-        x = self.conv1(x)
-        x = self.bn(x)
-        x = self.relu(x)
-        x = self.bn1(x)
-        x = self.bn2(x)
-        x = self.bn3(x)
-        x = self.bn4(x)
-        out1 = self.bn5(x)
-        x = self.bn6(out1)
-        x = self.bn7(x)
-        x = self.bn8(x)
-        x = self.bn9(x)
-        x = self.bn10(x)
-        out2 = self.bn11(x)
-        if self.fully_connected:
-            x = self.bn12(out2)
-            x = self.bn13(x)
-            x = self.bn14(x)
-            x = self.bn15(x)
-
-            x = self.conv2(x)
-            x = self.avgpool(x)
-            x = self.conv3(x)
-            return x
-        else:
-            return out1, out2
+def _make_divisible(v: float, divisor: int, min_value = None) -> int:
+    """
+    This function is taken from the original tf repo.
+    It ensures that all layers have a channel number that is divisible by 8
+    It can be seen here:
+    https://github.com/tensorflow/models/blob/master/research/slim/nets/mobilenet/mobilenet.py
+    """
+    if min_value is None:
+        min_value = divisor
+    new_v = max(min_value, int(v + divisor / 2) // divisor * divisor)
+    # Make sure that round down does not go down by more than 10%.
+    if new_v < 0.9 * v:
+        new_v += divisor
+    return new_v
 
 @keras.utils.register_keras_serializable('vision', name="Loss")
 class SSD(keras.Model):
@@ -148,8 +43,7 @@ class SSD(keras.Model):
 
     def build(self, input_shape):
         anchors = self.gen_anchors(input_shape[1:3])
-        self.mobilenet = MobileNetV2(num_classes=self.classes, fully_connected=False)
-        self.mobilenet.build(input_shape)
+        self.backbone = SSDMobileNetV2Backbone(input_shape)
         # for layer in self.mobilenet.layers[-7:]:
         #     layer.trainable=False
         # for layer in self.mobilenet.layers[-8].layers[2:-1]:
@@ -176,9 +70,9 @@ class SSD(keras.Model):
             self.resh.append(layers.Reshape((anchor.shape[0], self.classes)))
 
     def call(self, x):
-        out1, out2 = self.mobilenet(x)
-        self.features[0] = self.mobilenet.get_layer("BN4_1").out
-        self.features[1] = self.mobilenet.get_layer("BN5_3").out
+        out1, out2 = self.backbone(x)
+        self.features[0] = out1
+        self.features[1] = out2
         self.features[2] = self.conv1_2(self.conv1_1(self.features[1]))
         self.features[3] = self.conv2_2(self.conv2_1(self.features[2]))
         self.features[4] = self.conv3_2(self.conv3_1(self.features[3]))
