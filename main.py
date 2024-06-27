@@ -13,7 +13,7 @@ CLASSES = 80
 BATCH_SIZE = 16
 EPOCHS = 300
 ITERS = 200000
-BASE_LEARNING_RATE=0.004
+BASE_LEARNING_RATE = 1e-3
 IMG_SIZE = (320, 320) 
 
 COCO_FEATURE_MAP = {
@@ -32,8 +32,10 @@ def decode_tfrecord_feature(feature):
     features = tf.io.parse_single_example(feature, features=COCO_FEATURE_MAP)
     img = tf.image.decode_image(features["image/encoded"], channels=3, expand_animations=False)
     img = tf.cast(img, tf.float32)
+    # assert tf.reduce_min(img) >= 0.0 and tf.reduce_max(img) <= 1.0
+
+    # img /= img / 255.0
     sample_size = tf.shape(img)[0:2]
-    print(sample_size)
     img = tf.image.resize(img, IMG_SIZE)
     features["image/encoded"] = img
 
@@ -62,8 +64,6 @@ def prepare_samples(anchors):
                 box_id = tf.cast(best_iou(bbox[i]), tf.uint16)
                 y[box_id, :4] = bbox[i]
                 y[box_id, 4]  = cls[i]
-        else:
-            print("b")
         return features["image/encoded"], y 
     return func
 
@@ -71,7 +71,6 @@ def read_tfrecord(path, batch_size, epochs, anchors):
     if not os.path.exists(path):
         raise FileNotFoundError(path)
     dataset = tf.data.TFRecordDataset([path])
-    print(dataset.cardinality().numpy())
     dataset = dataset.map(decode_tfrecord_feature)
     dataset = dataset.map(prepare_samples(anchors))
     dataset = dataset.batch(batch_size)
@@ -102,14 +101,14 @@ def iou_loss(real, pred):
 def best_iou(anchors, searchBox):
     return np.argwhere(iou(np.matlib.repmat(searchBox,anchors.shape[0],1), anchors) > 0.5)
 
-def smoothL1(x,y):
-    absdiff = keras.ops.abs(tf.cast(x[..., :4], tf.float64) - tf.cast(y[..., :4], tf.float64))
+def smooth_l1(x, y):
+    absdiff = tf.abs(tf.cast(x[..., :4], tf.float64) - tf.cast(y[..., :4], tf.float64))
     sqrdiff = absdiff**2
-    loss = keras.ops.where(
+    loss = tf.where(
             absdiff < 1.0,
             0.5 * sqrdiff,
             absdiff - 0.5)
-    return keras.ops.mean(loss, axis=-1)
+    return tf.math.reduce_mean(loss, axis=-1)
 
 def confidenceLoss(real, pred):
     v = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
@@ -119,30 +118,27 @@ def confidenceLoss(real, pred):
     # class_weights = tf.constant([[[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0/BOXES]]*BOXES])
     # weights = tf.reduce_sum(class_weights * y, axis = -1)
     # weighted_loss = unweighted_loss * weights
-    return keras.ops.mean(unweighted_loss)
+    return tf.math.reduce_mean(unweighted_loss)
      
 
 @keras.utils.register_keras_serializable('vision', name="Loss")
 def Loss(gt,y):
-    print(y)
     # shape of y is n * BOXES * output_channels
     # shape of gt is n * BOXES * 5 
     loss = 0
     # localisation loss
-    loss += smoothL1(y[:,:,0:4], gt[:,:,0:4])
+    loss += smooth_l1(y[:,:,0:4], gt[:,:,0:4])
     # loss += iou_loss(y[:,:,0:4], gt[:,:,0:4])
     # confidence loss
     loss += confidenceLoss(y[:,:,4:], tf.cast(gt[:,:,4],tf.int32))
     return loss
     # return tf.math.log(loss)
 
-
 def main():
     model = SSD(classes=CLASSES)
     anchors = model.gen_anchors(img_size=IMG_SIZE)
     anchors = tf.concat(anchors, axis=0)
     anchors /= (IMG_SIZE[0], IMG_SIZE[1], IMG_SIZE[0], IMG_SIZE[1])
-    print(anchors)
     base_learning_rate = 0.001
 
     train_dataset = read_tfrecord("./train.tfrecord", BATCH_SIZE, EPOCHS, anchors)
@@ -150,8 +146,7 @@ def main():
 
     model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=BASE_LEARNING_RATE),
                   loss = Loss,
-                  # loss = {'bbox': iou_loss, 'conf': 'binary_crossentropy', 'cls' : 'categorical_crossentropy'},
-                  metrics = [smoothL1, iou]
+                  metrics = [smooth_l1, iou]
                   )
     history = model.fit(train_dataset,
                         epochs=EPOCHS,

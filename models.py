@@ -59,9 +59,10 @@ class Bottleneck(keras.Model):
         return x
 
 class MobileNetV2(keras.Model):
-    def __init__(self, num_classes):
+    def __init__(self, num_classes, fully_connected = True):
         super(MobileNetV2, self).__init__()
         self.num_classes = num_classes
+        self.fully_connected = fully_connected
 
     def build(self, input_shape):
         self.conv1 = layers.Conv2D(
@@ -90,16 +91,17 @@ class MobileNetV2(keras.Model):
         self.bn9  = Bottleneck(6, 96, 1, name="BN5_1")
         self.bn10 = Bottleneck(6, 96, 1, name="BN5_2")
         self.bn11 = Bottleneck(6, 96, 1, name="BN5_3")
-        
-        self.bn12 = Bottleneck(6, 160, 2, name="BN6_1")
-        self.bn13 = Bottleneck(6, 160, 1, name="BN6_2")
-        self.bn14 = Bottleneck(6, 160, 1, name="BN6_3")
-        
-        self.bn15 = Bottleneck(6, 320, 1, name="BN7")
-        self.conv2 = layers.Conv2D(filters = 1280, kernel_size=1, strides=(1,1), use_bias=False)
-        self.avgpool = layers.AveragePooling2D(
-                pool_size = (7,7))
-        self.conv3 = layers.Conv2D(filters=self.num_classes, kernel_size=1, strides=(1,1), use_bias=False)
+
+        if self.fully_connected:
+            self.bn12 = Bottleneck(6, 160, 2, name="BN6_1")
+            self.bn13 = Bottleneck(6, 160, 1, name="BN6_2")
+            self.bn14 = Bottleneck(6, 160, 1, name="BN6_3")
+            
+            self.bn15 = Bottleneck(6, 320, 1, name="BN7")
+            self.conv2 = layers.Conv2D(filters = 1280, kernel_size=1, strides=(1,1), use_bias=False)
+            self.avgpool = layers.AveragePooling2D(
+                    pool_size = (7,7))
+            self.conv3 = layers.Conv2D(filters=self.num_classes, kernel_size=1, strides=(1,1), use_bias=False)
 
     def call(self, x):
         x = self.conv1(x)
@@ -109,22 +111,25 @@ class MobileNetV2(keras.Model):
         x = self.bn2(x)
         x = self.bn3(x)
         x = self.bn4(x)
-        x = self.bn5(x)
-        x = self.bn6(x)
+        out1 = self.bn5(x)
+        x = self.bn6(out1)
         x = self.bn7(x)
         x = self.bn8(x)
         x = self.bn9(x)
         x = self.bn10(x)
-        x = self.bn11(x)
-        x = self.bn12(x)
-        x = self.bn13(x)
-        x = self.bn14(x)
-        x = self.bn15(x)
+        out2 = self.bn11(x)
+        if self.fully_connected:
+            x = self.bn12(out2)
+            x = self.bn13(x)
+            x = self.bn14(x)
+            x = self.bn15(x)
 
-        x = self.conv2(x)
-        x = self.avgpool(x)
-        x = self.conv3(x)
-        return x
+            x = self.conv2(x)
+            x = self.avgpool(x)
+            x = self.conv3(x)
+            return x
+        else:
+            return out1, out2
 
 @keras.utils.register_keras_serializable('vision', name="Loss")
 class SSD(keras.Model):
@@ -143,8 +148,7 @@ class SSD(keras.Model):
 
     def build(self, input_shape):
         anchors = self.gen_anchors(input_shape[1:3])
-        # self.mobilenet = keras.applications.MobileNetV2(input_shape[1:4], alpha=1.0, include_top=False, classes=self.classes, weights=None)
-        self.mobilenet = MobileNetV2(k=self.classes)
+        self.mobilenet = MobileNetV2(num_classes=self.classes, fully_connected=False)
         self.mobilenet.build(input_shape)
         # for layer in self.mobilenet.layers[-7:]:
         #     layer.trainable=False
@@ -168,13 +172,11 @@ class SSD(keras.Model):
         self.resh = []
         for i, anchor in enumerate(anchors):
             name1 = f"Classification_{i}"
-            print(anchor.shape)
             self.conv.append(layers.Conv2D(self.numBoxes[i] * self.classes, 3, padding='same'))
             self.resh.append(layers.Reshape((anchor.shape[0], self.classes)))
 
     def call(self, x):
-        x = self.mobilenet(x)
-        print(x)
+        out1, out2 = self.mobilenet(x)
         self.features[0] = self.mobilenet.get_layer("BN4_1").out
         self.features[1] = self.mobilenet.get_layer("BN5_3").out
         self.features[2] = self.conv1_2(self.conv1_1(self.features[1]))
@@ -185,7 +187,6 @@ class SSD(keras.Model):
         results = [None for _ in range(self.featureMaps)]
         for i in range(self.featureMaps):
             x = self.conv[i](self.features[i])
-            print(x.shape)
             x = self.resh[i](x)
             results[i] = x
         x = layers.concatenate(results, axis = -2)
@@ -217,7 +218,6 @@ class SSD(keras.Model):
                                  anchor_strides = [],
                                  anchor_offsets = [])
         layers = [(img_size[0] / v, img_size[1] / v) for v in self.layerSize]
-        print(layers)
         layers = [(math.ceil(x), math.ceil(y)) for (x, y) in layers]
         return gen.generate(layers, im_width=img_size[0], im_height=img_size[1])
     def model(self, input_shape):
