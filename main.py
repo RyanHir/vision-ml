@@ -4,6 +4,8 @@ import tensorflow as tf
 import numpy as np
 import os
 
+import albumentations as A
+
 # tf.compat.v1.disable_eager_execution()
 
 from anchors import GridAnchorGenerator, create_ssd_anchors
@@ -40,22 +42,43 @@ def decode_tfrecord_feature(feature):
     features["image/encoded"] = img
 
     y = [
-        tf.sparse.to_dense(features['image/object/bbox/xmin'], default_value=0),
-        tf.sparse.to_dense(features['image/object/bbox/ymax'], default_value=0),
-        tf.sparse.to_dense(features['image/object/bbox/xmin'], default_value=0),
-        tf.sparse.to_dense(features['image/object/bbox/ymax'], default_value=0),
+        tf.sparse.to_dense(features['image/object/bbox/xmin']),
+        tf.sparse.to_dense(features['image/object/bbox/ymin']),
+        tf.sparse.to_dense(features['image/object/bbox/xmax']),
+        tf.sparse.to_dense(features['image/object/bbox/ymax']),
     ]
-    y = tf.reshape(y, (-1, 4))
-#     y /= tf.repeat(tf.cast(sample_size[::-1], tf.float32), 2)
-    # y *= (IMG_SIZE[0], IMG_SIZE[1], IMG_SIZE[0], IMG_SIZE[1])
+    y = tf.stack(y, axis=-1)
     features["image/object/bbox"] = y
     features["image/object/class/label"] = tf.sparse.to_dense(features["image/object/class/label"])
     return features
 
+AUGMENT = A.Compose([
+    A.Rotate(limit=70, min_area=1),
+    A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.1, p=0.5),
+    A.HorizontalFlip(),
+    ], bbox_params=A.BboxParams(format='albumentations', label_fields=["labels"]))
+
+def augment(features):
+    @tf.numpy_function(Tout=[tf.float32, tf.float32, tf.int64])
+    def fn(image, bboxes, labels):
+        global AUGMENT
+        mask = np.bitwise_and(bboxes[:, 0] != bboxes[:, 2], bboxes[:, 1] != bboxes[:, 3])
+        bboxes = bboxes[mask]
+        labels = labels[mask]
+        res = AUGMENT(image=image, bboxes=bboxes, labels=labels)
+        return np.array(res["image"], dtype=np.float32), np.array(res["bboxes"], dtype=np.float32), np.array(res["labels"], dtype=np.int64)
+    results = fn(features["image/encoded"], features["image/object/bbox"], features["image/object/class/label"])
+    features["image/encoded"] = results[0]
+    features["image/object/bbox"] = results[1]
+    features["image/object/class/label"] = results[2]
+    return features
+
+
 def prepare_samples(anchors):
     def func(features):
-        bbox = features["image/object/bbox"]
-        cls  = features["image/object/class/label"]
+        image = features["image/encoded"]
+        bbox  = features["image/object/bbox"]
+        cls   = features["image/object/class/label"]
 
         num = bbox.shape[0]
         y1 = tf.zeros((anchors.shape[0], 4), dtype=tf.float32)
@@ -73,9 +96,10 @@ def read_tfrecord(path, batch_size, epochs, anchors):
         raise FileNotFoundError(path)
     dataset = tf.data.TFRecordDataset([path])
     dataset = dataset.map(decode_tfrecord_feature)
-    dataset = dataset.map(prepare_samples(anchors))
-    dataset = dataset.batch(batch_size)
     dataset = dataset.repeat()
+    dataset = dataset.map(augment, num_parallel_calls=tf.data.AUTOTUNE)
+    dataset = dataset.map(prepare_samples(anchors), num_parallel_calls=tf.data.AUTOTUNE)
+    dataset = dataset.batch(batch_size)
     return dataset
 
 def iou(box1, box2):
