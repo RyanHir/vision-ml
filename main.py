@@ -10,10 +10,10 @@ from anchors import GridAnchorGenerator, create_ssd_anchors
 from models import SSD
 
 CLASSES = 80
-BATCH_SIZE = 16
+BATCH_SIZE = 24
 EPOCHS = 300
 ITERS = 200000
-BASE_LEARNING_RATE = 1e-3
+BASE_LEARNING_RATE = 1e-4
 IMG_SIZE = (320, 320) 
 
 COCO_FEATURE_MAP = {
@@ -58,13 +58,14 @@ def prepare_samples(anchors):
         cls  = features["image/object/class/label"]
 
         num = bbox.shape[0]
-        y = tf.zeros((anchors.shape[0], 5), dtype=tf.float32)
+        y1 = tf.zeros((anchors.shape[0], 4), dtype=tf.float32)
+        y2 = tf.zeros((anchors.shape[0], 1), dtype=tf.float32)
         if num is not None:
             for i in range(num):
                 box_id = tf.cast(best_iou(bbox[i]), tf.uint16)
-                y[box_id, :4] = bbox[i]
-                y[box_id, 4]  = cls[i]
-        return features["image/encoded"], y 
+                y1[box_id, :] = bbox[i]
+                y2[box_id, 0] = cls[i]
+        return features["image/encoded"], {"bbox": y1, "cls": y2} 
     return func
 
 def read_tfrecord(path, batch_size, epochs, anchors):
@@ -101,6 +102,7 @@ def iou_loss(real, pred):
 def best_iou(anchors, searchBox):
     return np.argwhere(iou(np.matlib.repmat(searchBox,anchors.shape[0],1), anchors) > 0.5)
 
+@keras.utils.register_keras_serializable('vision', name="SmoothL1")
 def smooth_l1(x, y):
     absdiff = tf.abs(tf.cast(x[..., :4], tf.float64) - tf.cast(y[..., :4], tf.float64))
     sqrdiff = absdiff**2
@@ -110,31 +112,8 @@ def smooth_l1(x, y):
             absdiff - 0.5)
     return tf.math.reduce_mean(loss, axis=-1)
 
-def confidenceLoss(real, pred):
-    v = keras.losses.SparseCategoricalCrossentropy(from_logits=True)
-    unweighted_loss = v(pred, real)
-    unweighted_loss = tf.cast(unweighted_loss, tf.float64)
-    # unweighted_loss = tf.nn.sparse_softmax_cross_entropy_with_logits(label, y)
-    # class_weights = tf.constant([[[1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0/BOXES]]*BOXES])
-    # weights = tf.reduce_sum(class_weights * y, axis = -1)
-    # weighted_loss = unweighted_loss * weights
-    return tf.math.reduce_mean(unweighted_loss)
-     
-
-@keras.utils.register_keras_serializable('vision', name="Loss")
-def Loss(gt,y):
-    # shape of y is n * BOXES * output_channels
-    # shape of gt is n * BOXES * 5 
-    loss = 0
-    # localisation loss
-    loss += smooth_l1(y[:,:,0:4], gt[:,:,0:4])
-    # loss += iou_loss(y[:,:,0:4], gt[:,:,0:4])
-    # confidence loss
-    loss += confidenceLoss(y[:,:,4:], tf.cast(gt[:,:,4],tf.int32))
-    return loss
-    # return tf.math.log(loss)
-
 def main():
+
     model = SSD(classes=CLASSES)
     anchors = model.gen_anchors(img_size=IMG_SIZE)
     anchors = tf.concat(anchors, axis=0)
@@ -144,9 +123,14 @@ def main():
     train_dataset = read_tfrecord("./train.tfrecord", BATCH_SIZE, EPOCHS, anchors)
     test_dataset  = read_tfrecord("./validate.tfrecord", BATCH_SIZE, EPOCHS, anchors)
 
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=BASE_LEARNING_RATE),
-                  loss = Loss,
-                  metrics = [smooth_l1, iou]
+    model.compile(optimizer=tf.keras.optimizers.SGD(learning_rate=BASE_LEARNING_RATE),
+                  loss = {
+                      "bbox": smooth_l1,
+                      "cls": keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+                      },
+                  metrics = {
+                      "bbox": "mse",
+                      }
                   )
     history = model.fit(train_dataset,
                         epochs=EPOCHS,
