@@ -39,7 +39,7 @@ class SSD(keras.Model):
         self.numBoxes[0] = len(self.ratiosLast)
 
     def build(self, input_shape):
-        self.feature_extractor = SSDMobileNetV2FeatureExtractor(min_depth=32, depth_multiplier=2.5)
+        self.feature_extractor = SSDMobileNetV2FeatureExtractor(min_depth=32, depth_multiplier=1.0)
 
         self.conv = []
         self.resh = []
