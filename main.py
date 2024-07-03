@@ -33,12 +33,8 @@ COCO_FEATURE_MAP = {
 def decode_tfrecord_feature(feature):
     features = tf.io.parse_single_example(feature, features=COCO_FEATURE_MAP)
     img = tf.image.decode_image(features["image/encoded"], channels=3, expand_animations=False)
-    img = tf.cast(img, tf.float32)
-    # assert tf.reduce_min(img) >= 0.0 and tf.reduce_max(img) <= 1.0
-
-    # img /= img / 255.0
-    sample_size = tf.shape(img)[0:2]
-    img = tf.image.resize(img, IMG_SIZE)
+    img = tf.image.resize(img, IMG_SIZE[::-1])
+    img = tf.cast(img / 255.0, tf.float32)
     features["image/encoded"] = img
 
     y = [
@@ -53,7 +49,7 @@ def decode_tfrecord_feature(feature):
     return features
 
 AUGMENT = A.Compose([
-    A.Rotate(limit=70, min_area=1),
+    A.Rotate(limit=70),
     A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.1, p=0.5),
     A.HorizontalFlip(),
     ], bbox_params=A.BboxParams(format='albumentations', label_fields=["labels"]))
@@ -66,8 +62,12 @@ def augment(features):
         bboxes = bboxes[mask]
         labels = labels[mask]
         res = AUGMENT(image=image, bboxes=bboxes, labels=labels)
-        return np.array(res["image"], dtype=np.float32), np.array(res["bboxes"], dtype=np.float32), np.array(res["labels"], dtype=np.int64)
+        images = np.array(res["image"], dtype=np.float32)
+        bboxes = np.array(res["bboxes"], dtype=np.float32)
+        labels = np.array(res["labels"], dtype=np.int64)
+        return images, bboxes, labels
     results = fn(features["image/encoded"], features["image/object/bbox"], features["image/object/class/label"])
+    results[0].set_shape((IMG_SIZE[0], IMG_SIZE[1], 3))
     features["image/encoded"] = results[0]
     features["image/object/bbox"] = results[1]
     features["image/object/class/label"] = results[2]
@@ -137,7 +137,6 @@ def smooth_l1(x, y):
     return tf.math.reduce_mean(loss, axis=-1)
 
 def main():
-
     model = SSD(classes=CLASSES)
     anchors = model.gen_anchors(img_size=IMG_SIZE)
     anchors = tf.concat(anchors, axis=0)
