@@ -24,12 +24,13 @@ def _make_divisible(v: float, divisor: int, min_value = None) -> int:
 
 @keras.utils.register_keras_serializable('vision', name="Loss")
 class SSD(keras.Model):
-    def __init__(self, classes = 10, *args, **kwargs):
+    def __init__(self, classes = 10, disable_tensor_split=False, *args, **kwargs):
         super(SSD, self).__init__(*args, **kwargs)
         self.classes = classes + 4
         self.ratios = [1.0, 2.0, 3.0, 1.0 / 2.0, 1.0 / 3.0]
         self.ratiosLast = [1.0, 2.0, 0.5]
         self.featureMaps = 6
+        self.disable_tensor_split = disable_tensor_split
 
         layerStart = 3
         layerStop = layerStart + self.featureMaps
@@ -43,9 +44,11 @@ class SSD(keras.Model):
 
         self.conv = []
         self.resh = []
-        for numBox in self.numBoxes:
+        for layer, numBox in zip(range(3, 9), self.numBoxes):
+            h = math.ceil(input_shape[1] / 2**layer)
+            w = math.ceil(input_shape[2] / 2**layer)
             self.conv.append(layers.Conv2D(numBox * self.classes, 3, padding='same'))
-            self.resh.append(layers.Reshape((-1, self.classes)))
+            self.resh.append(layers.Reshape((h * w * numBox, self.classes)))
 
     def call(self, x):
         features = self.feature_extractor(x)
@@ -55,6 +58,8 @@ class SSD(keras.Model):
             x = self.resh[i](x)
             results[i] = x
         x = layers.concatenate(results, axis = -2)
+        if self.disable_tensor_split:
+            return x
         return {"bbox": x[..., 0:4], "cls": x[..., 4:]}
 
     def gen_anchors(self, img_size, min_scale = 0.1, max_scale = 0.95):
