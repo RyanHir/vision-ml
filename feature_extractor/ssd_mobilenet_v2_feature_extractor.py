@@ -16,28 +16,44 @@ def _build_feature_extractors(from_layers, layer_depths, depth_multiplier, min_d
         network = []
         if from_layer:
             base_from_layer = from_layer
-        layer_name = "{}_2_conv2d_{}_{}x{}_s2_{}".format(
+            networks.append(None)
+        else:
+            layer_name = "{}_1_conv2d_{}_1x1_{}".format(
+                base_from_layer,
+                index,
+                depth_fn(layer_depth // 2))
+            network.append(layers.Conv2D(
+                depth_fn(layer_depth // 2),
+                [1,1],
+                padding="same",
+                strides=1,
+                name=layer_name + "_conv"))
+            network.append(layers.BatchNormalization(name=layer_name + "_batchnorm"))
+            network.append(layers.Lambda(tf.nn.relu6, name=layer_name))
+
+
+            layer_name = "{}_2_conv2d_{}_{}x{}_s2_{}".format(
                 base_from_layer,
                 index,
                 conv_kernel_size, conv_kernel_size, depth_fn(layer_depth))
-        network.append(layers.Conv2D(
-            depth_fn(layer_depth // 2),
-            [conv_kernel_size, conv_kernel_size],
-            padding="same",
-            strides=2,
-            name=layer_name + "_conv"))
-        network.append(layers.BatchNormalization(name=layer_name + "_batchnorm"))
-        network.append(layers.Lambda(tf.nn.relu6, name=layer_name))
-        networks.append(network)
+            network.append(layers.Conv2D(
+                depth_fn(layer_depth),
+                [conv_kernel_size, conv_kernel_size],
+                padding="same",
+                strides=2,
+                name=layer_name + "_conv"))
+            network.append(layers.BatchNormalization(name=layer_name + "_batchnorm"))
+            network.append(layers.Lambda(tf.nn.relu6, name=layer_name))
+            networks.append(network)
     return networks
 
 class SSDMobileNetV2FeatureExtractor(keras.Model):
-    def __init__(self, min_depth, depth_multiplier = 1.0):
+    def __init__(self, min_depth, depth_multiplier = 1.0, layers = 6):
         super().__init__()
         self.min_depth = min_depth
         self.depth_multiplier = depth_multiplier
-        self.from_layers = ["layer_1", "layer_2", "", "", "", ""]
-        self.layer_depths = [-1, -1, 512, 256, 256, 128]
+        self.from_layers = ["layer_1", "layer_2", "", "", "", "", "", ""][:layers]
+        self.layer_depths = [-1, -1, 512, 256, 256, 128, 128, 64][:layers]
     def build(self, input_size):
         self.backbone = SSDMobileNetV2Backbone(input_size)
         self.feature_networks = _build_feature_extractors(self.from_layers, self.layer_depths, self.depth_multiplier, self.min_depth)
