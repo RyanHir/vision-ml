@@ -29,7 +29,7 @@ class SSD(keras.Model):
         self.classes = classes + 4
         self.ratios = [1.0, 2.0, 3.0, 1.0 / 2.0, 1.0 / 3.0]
         self.ratiosLast = [1.0, 2.0, 0.5]
-        self.featureMaps = 6
+        self.featureMaps = 7
         self.disable_tensor_split = disable_tensor_split
 
         layerStart = 3
@@ -40,13 +40,13 @@ class SSD(keras.Model):
         self.numBoxes[0] = len(self.ratiosLast)
 
     def build(self, input_shape):
-        self.feature_extractor = SSDMobileNetV2FeatureExtractor(min_depth=32, depth_multiplier=1.0)
+        self.feature_extractor = SSDMobileNetV2FeatureExtractor(min_depth=32, depth_multiplier=1.0, layers=self.featureMaps)
 
         self.conv = []
         self.resh = []
-        for layer, numBox in zip(range(3, 9), self.numBoxes):
-            h = math.ceil(input_shape[1] / 2**layer)
-            w = math.ceil(input_shape[2] / 2**layer)
+        for layerSize, numBox in zip(self.layerSize, self.numBoxes):
+            h = math.ceil(input_shape[1] / layerSize)
+            w = math.ceil(input_shape[2] / layerSize)
             self.conv.append(layers.Conv2D(numBox * self.classes, 3, padding='same'))
             self.resh.append(layers.Reshape((h * w * numBox, self.classes)))
 
@@ -60,7 +60,7 @@ class SSD(keras.Model):
         x = layers.concatenate(results, axis = -2)
         if self.disable_tensor_split:
             return x
-        return {"bbox": x[..., 0:4], "cls": x[..., 4:]}
+        return {"boxes": x[..., 0:4], "classes": x[..., 4:]}
 
     def gen_anchors(self, img_size, min_scale = 0.1, max_scale = 0.95):
         # a = Anchor(
