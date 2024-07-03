@@ -6,16 +6,16 @@ import os
 
 import albumentations as A
 
-# tf.compat.v1.disable_eager_execution()
-
 from anchors import GridAnchorGenerator, create_ssd_anchors
 from models import SSD
 
 CLASSES = 80
-BATCH_SIZE = 24
-EPOCHS = 300
-ITERS = 200000
-BASE_LEARNING_RATE = 1e-4
+BATCH_SIZE = 32 
+EPOCHS = 100
+ITERS = 20000
+LEARNING_RATE_INITIAL = 1e-3
+LEARNING_RATE_MOMENTUM = 0.9
+LEARNING_RATE_CLIPNORM = 10.0
 IMG_SIZE = (320, 320) 
 
 COCO_FEATURE_MAP = {
@@ -88,7 +88,7 @@ def prepare_samples(anchors):
                 box_id = tf.cast(best_iou(bbox[i]), tf.uint16)
                 y1[box_id, :] = bbox[i]
                 y2[box_id, 0] = cls[i]
-        return features["image/encoded"], {"bbox": y1, "cls": y2} 
+        return features["image/encoded"], {"boxes": y1, "classes": y2} 
     return func
 
 def read_tfrecord(path, batch_size, epochs, anchors):
@@ -146,14 +146,11 @@ def main():
     train_dataset = read_tfrecord("./train.tfrecord", BATCH_SIZE, EPOCHS, anchors)
     test_dataset  = read_tfrecord("./validate.tfrecord", BATCH_SIZE, EPOCHS, anchors)
 
-    model.compile(optimizer=tf.keras.optimizers.SGD(learning_rate=BASE_LEARNING_RATE),
+    model.compile(optimizer=tf.keras.optimizers.SGD(learning_rate=LEARNING_RATE_INITIAL, momentum=LEARNING_RATE_MOMENTUM, global_clipnorm=LEARNING_RATE_CLIPNORM),
                   loss = {
-                      "bbox": smooth_l1,
-                      "cls": keras.losses.SparseCategoricalCrossentropy(from_logits=True),
+                      "boxes": smooth_l1,
+                      "classes": keras.losses.SparseCategoricalCrossentropy(from_logits=True),
                       },
-                  metrics = {
-                      "bbox": "mse",
-                      }
                   )
     history = model.fit(train_dataset,
                         epochs=EPOCHS,
